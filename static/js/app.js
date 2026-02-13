@@ -4661,6 +4661,35 @@ async function toggleItemMultiSpec(cookieId, itemId, isMultiSpec) {
     }
 }
 
+// 切换商品"确认收货后才发货"状态
+async function toggleItemConfirmDelivery(cookieId, itemId, requireConfirm) {
+    try {
+    const response = await fetch(`${apiBase}/items/${encodeURIComponent(cookieId)}/${encodeURIComponent(itemId)}/confirm-delivery`, {
+        method: 'PUT',
+        headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${authToken}`
+        },
+        body: JSON.stringify({
+        require_confirm: requireConfirm
+        })
+    });
+
+    if (response.ok) {
+        const data = await response.json();
+        showToast(data.message || `${requireConfirm ? '开启' : '关闭'}确认收货发货成功`, 'success');
+        // 刷新商品列表
+        await refreshItemsData();
+    } else {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || errorData.error || '操作失败');
+    }
+    } catch (error) {
+    console.error('切换确认收货发货状态失败:', error);
+    showToast(`切换确认收货发货状态失败: ${error.message}`, 'danger');
+    }
+}
+
 // 加载商品列表
 async function loadItems() {
     try {
@@ -4820,7 +4849,7 @@ function displayItems(items) {
     const tbody = document.getElementById('itemsTableBody');
 
     if (!items || items.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">暂无商品数据</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">暂无商品数据</td></tr>';
     // 重置选择状态
     const selectAllCheckbox = document.getElementById('selectAllItems');
     if (selectAllCheckbox) {
@@ -4862,6 +4891,12 @@ function displayItems(items) {
         '<span class="badge bg-success">多规格</span>' :
         '<span class="badge bg-secondary">普通</span>';
 
+    // 确认收货后发货状态显示
+    const requireConfirmDelivery = item.require_confirm_delivery;
+    const confirmDeliveryDisplay = requireConfirmDelivery ?
+        '<span class="badge bg-warning" title="买家需确认收货后才发货"><i class="bi bi-check-circle-fill me-1"></i>需确认</span>' :
+        '<span class="badge bg-light text-dark" title="付款后直接发货"><i class="bi bi-x-circle me-1"></i>直接发</span>';
+
     return `
         <tr>
         <td>
@@ -4875,6 +4910,7 @@ function displayItems(items) {
         <td title="${escapeHtml(item.item_title || '未设置')}">${escapeHtml(itemTitleDisplay)}</td>
         <td title="${escapeHtml(item.item_detail || '未设置')}">${escapeHtml(itemDetailDisplay)}</td>
         <td>${multiSpecDisplay}</td>
+        <td>${confirmDeliveryDisplay}</td>
         <td>${formatDateTime(item.updated_at)}</td>
         <td>
             <div class="btn-group" role="group">
@@ -4884,8 +4920,8 @@ function displayItems(items) {
             <button class="btn btn-sm btn-outline-danger" onclick="deleteItem('${escapeHtml(item.cookie_id)}', '${escapeHtml(item.item_id)}', '${escapeHtml(item.item_title || item.item_id)}')" title="删除">
                 <i class="bi bi-trash"></i>
             </button>
-            <button class="btn btn-sm ${isMultiSpec ? 'btn-warning' : 'btn-success'}" onclick="toggleItemMultiSpec('${escapeHtml(item.cookie_id)}', '${escapeHtml(item.item_id)}', ${!isMultiSpec})" title="${isMultiSpec ? '关闭多规格' : '开启多规格'}">
-                <i class="bi ${isMultiSpec ? 'bi-toggle-on' : 'bi-toggle-off'}"></i>
+            <button class="btn btn-sm ${requireConfirmDelivery ? 'btn-warning' : 'btn-success'}" onclick="toggleItemConfirmDelivery('${escapeHtml(item.cookie_id)}', '${escapeHtml(item.item_id)}', ${!requireConfirmDelivery})" title="${requireConfirmDelivery ? '关闭确认收货发货' : '开启确认收货发货'}">
+                <i class="bi ${requireConfirmDelivery ? 'bi-shield-check' : 'bi-shield-slash'}"></i>
             </button>
             </div>
         </td>

@@ -242,6 +242,19 @@ class XianyuLive:
             if not self.can_auto_delivery(order_id):
                 return
 
+            # 检查商品是否设置了"需确认收货后才发货"
+            try:
+                from db_manager import db_manager
+                require_confirm_delivery = db_manager.get_item_confirm_delivery_status(self.cookie_id, item_id)
+                if require_confirm_delivery:
+                    logger.info(f'[{msg_time}] 【{self.cookie_id}】商品 {item_id} 设置了"需确认收货后才发货"，跳过自动发货')
+                    # 发送提示消息给买家
+                    await self.send_msg(websocket, chat_id, send_user_id,
+                        "亲，此商品需要您先确认收货后才会自动发货哦~ 确认收货后系统会立即为您发货，请耐心等待！")
+                    return
+            except Exception as check_e:
+                logger.warning(f'[{msg_time}] 【{self.cookie_id}】检查商品确认收货发货设置失败: {self._safe_str(check_e)}')
+
             # 构造用户URL
             user_url = f'https://www.goofish.com/personal?userId={send_user_id}'
 

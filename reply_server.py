@@ -3498,6 +3498,69 @@ def update_item_multi_spec(cookie_id: str, item_id: str, spec_data: dict, _: Non
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# 商品确认收货后发货管理API
+@app.put("/items/{cookie_id}/{item_id}/confirm-delivery")
+def update_item_confirm_delivery(cookie_id: str, item_id: str, confirm_data: dict, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """更新商品的"需买家确认收货后才发货"状态"""
+    try:
+        from db_manager import db_manager
+
+        # 检查cookie是否属于当前用户
+        user_id = current_user['user_id']
+        user_cookies = db_manager.get_all_cookies(user_id)
+
+        if cookie_id not in user_cookies:
+            raise HTTPException(status_code=403, detail="无权限操作该Cookie")
+
+        require_confirm = confirm_data.get('require_confirm', False)
+
+        success = db_manager.update_item_confirm_delivery_status(cookie_id, item_id, require_confirm)
+
+        if success:
+            logger.info(f"用户 {current_user['username']} 更新商品 {item_id} 的确认收货发货状态为: {require_confirm}")
+            return {
+                "success": True,
+                "message": f"已{'开启' if require_confirm else '关闭'}\"买家确认收货后才发货\"设置",
+                "require_confirm": require_confirm
+            }
+        else:
+            raise HTTPException(status_code=404, detail="商品不存在")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新商品确认收货发货状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/items/{cookie_id}/{item_id}/confirm-delivery")
+def get_item_confirm_delivery(cookie_id: str, item_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取商品的"需买家确认收货后才发货"状态"""
+    try:
+        from db_manager import db_manager
+
+        # 检查cookie是否属于当前用户
+        user_id = current_user['user_id']
+        user_cookies = db_manager.get_all_cookies(user_id)
+
+        if cookie_id not in user_cookies:
+            raise HTTPException(status_code=403, detail="无权限访问该Cookie")
+
+        require_confirm = db_manager.get_item_confirm_delivery_status(cookie_id, item_id)
+
+        return {
+            "success": True,
+            "require_confirm": require_confirm,
+            "message": f"该商品{'需要' if require_confirm else '不需要'}买家确认收货后才发货"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取商品确认收货发货状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # 移除自动启动，由Start.py或手动启动
 # if __name__ == "__main__":
 #     uvicorn.run(app, host="0.0.0.0", port=8080)
