@@ -2713,7 +2713,29 @@ class XianyuLive:
                     logger.error(f"[{msg_time}] 【API调用失败】用户: {send_user_name} (ID: {send_user_id}), 商品({item_id}): {send_message}")
             
             if send_message == '[我已拍下，待付款]':
-                logger.info(f'[{msg_time}] 【{self.cookie_id}】系统消息不处理')
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】买家拍下商品，检查是否需要发送确认收货提醒')
+                # 检查商品是否设置了"需确认收货后才发货"
+                try:
+                    from db_manager import db_manager
+                    require_confirm_delivery = db_manager.get_item_confirm_delivery_status(self.cookie_id, item_id)
+                    if require_confirm_delivery:
+                        logger.info(f'[{msg_time}] 【{self.cookie_id}】商品 {item_id} 设置了"需确认收货后才发货"，发送提醒私信')
+                        # 发送提醒私信给买家
+                        reminder_msg = (
+                            "亲，您好！感谢您的购买！🎉\n\n"
+                            "📌 温馨提示：此商品需要您先确认收货后才会自动发货哦~\n\n"
+                            "📝 操作步骤：\n"
+                            "1. 请先完成付款\n"
+                            "2. 付款成功后，请点击「确认收货」\n"
+                            "3. 确认收货后，系统会立即为您自动发货\n\n"
+                            "如有任何问题，请随时联系我~ 😊"
+                        )
+                        await self.send_msg(websocket, chat_id, send_user_id, reminder_msg)
+                        logger.info(f'[{msg_time}] 【{self.cookie_id}】已向买家 {send_user_name} 发送确认收货提醒私信')
+                    else:
+                        logger.info(f'[{msg_time}] 【{self.cookie_id}】商品 {item_id} 未设置确认收货发货，跳过提醒')
+                except Exception as check_e:
+                    logger.warning(f'[{msg_time}] 【{self.cookie_id}】检查商品确认收货发货设置失败: {self._safe_str(check_e)}')
                 return
             elif send_message == '[你关闭了订单，钱款已原路退返]':
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】系统消息不处理')
