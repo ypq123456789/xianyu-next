@@ -238,15 +238,6 @@ class DBManager:
                 self._execute_sql(cursor, "ALTER TABLE keywords ADD COLUMN item_id TEXT")
                 logger.info("keywords 表 item_id 列添加完成")
 
-            # 检查并添加 require_confirm_delivery 列（用于买家确认收货后才发货功能）
-            try:
-                self._execute_sql(cursor, "SELECT require_confirm_delivery FROM item_info LIMIT 1")
-            except sqlite3.OperationalError:
-                # require_confirm_delivery 列不存在，需要添加
-                logger.info("正在为 item_info 表添加 require_confirm_delivery 列...")
-                self._execute_sql(cursor, "ALTER TABLE item_info ADD COLUMN require_confirm_delivery BOOLEAN DEFAULT FALSE")
-                logger.info("item_info 表 require_confirm_delivery 列添加完成")
-
             # 创建商品信息表
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS item_info (
@@ -259,12 +250,21 @@ class DBManager:
                 item_price TEXT,
                 item_detail TEXT,
                 is_multi_spec BOOLEAN DEFAULT FALSE,
+                require_confirm_delivery BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE,
                 UNIQUE(cookie_id, item_id)
             )
             ''')
+
+            # 检查并添加 require_confirm_delivery 列（兼容历史数据库）
+            try:
+                self._execute_sql(cursor, "SELECT require_confirm_delivery FROM item_info LIMIT 1")
+            except sqlite3.OperationalError:
+                logger.info("正在为 item_info 表添加 require_confirm_delivery 列...")
+                self._execute_sql(cursor, "ALTER TABLE item_info ADD COLUMN require_confirm_delivery BOOLEAN DEFAULT FALSE")
+                logger.info("item_info 表 require_confirm_delivery 列添加完成")
 
             # 创建自动发货规则表
             cursor.execute('''
