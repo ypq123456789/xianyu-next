@@ -12,7 +12,7 @@ from utils.xianyu_utils import (
 )
 from config import (
     WEBSOCKET_URL, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT,
-    TOKEN_REFRESH_INTERVAL, TOKEN_RETRY_INTERVAL, config, COOKIES_STR,
+    TOKEN_REFRESH_INTERVAL, TOKEN_RETRY_INTERVAL, RISK_CONTROL_RETRY_INTERVAL, config, COOKIES_STR,
     LOG_CONFIG, AUTO_REPLY, DEFAULT_HEADERS, WEBSOCKET_HEADERS,
     APP_CONFIG, API_ENDPOINTS
 )
@@ -90,9 +90,12 @@ class XianyuLive:
         # Token刷新相关配置
         self.token_refresh_interval = TOKEN_REFRESH_INTERVAL
         self.token_retry_interval = TOKEN_RETRY_INTERVAL
+        self.risk_control_retry_interval = RISK_CONTROL_RETRY_INTERVAL
         self.last_token_refresh_time = 0
         self.current_token = None
         self.token_refresh_task = None
+        self.risk_control_until = 0
+        self.risk_control_url = ""
         self.connection_restart_flag = False  # 连接重启标志
 
         # 通知防重复机制
@@ -109,6 +112,60 @@ class XianyuLive:
         
 
         self.session = None  # 用于API调用的aiohttp session
+
+    def _is_risk_control_active(self) -> bool:
+        """Return whether current account is still in risk-control cooldown."""
+        return time.time() < self.risk_control_until
+
+    def _get_risk_control_wait_seconds(self) -> int:
+        """Get remaining risk-control cooldown seconds."""
+        return max(0, int(self.risk_control_until - time.time()))
+
+    def _extract_risk_control_url(self, res_json: dict) -> str:
+        """Extract captcha/punish URL from token API response."""
+        if not isinstance(res_json, dict):
+            return ""
+        data = res_json.get('data')
+        if isinstance(data, dict):
+            url = data.get('url')
+            if isinstance(url, str):
+                return url
+        return ""
+
+    def _is_risk_control_response(self, res_json: dict) -> bool:
+        """Detect platform risk-control responses that require captcha validation."""
+        if not isinstance(res_json, dict):
+            return False
+
+        ret_values = res_json.get('ret', [])
+        if not isinstance(ret_values, list):
+            ret_values = [str(ret_values)]
+        ret_text = ' '.join(str(ret) for ret in ret_values)
+
+        risk_keywords = (
+            'FAIL_SYS_USER_VALIDATE',
+            'RGV587_ERROR',
+            'action=captcha',
+            'x5step=2',
+        )
+        if any(keyword in ret_text for keyword in risk_keywords):
+            return True
+
+        risk_url = self._extract_risk_control_url(res_json)
+        return any(keyword in risk_url for keyword in ('action=captcha', 'x5step=2', 'punish'))
+
+    def _mark_risk_control(self, reason: str, url: str = ""):
+        """Set cooldown window when risk-control is detected."""
+        retry_after = max(self.risk_control_retry_interval, self.token_retry_interval)
+        self.risk_control_until = time.time() + retry_after
+        self.risk_control_url = url or ""
+
+        if self.risk_control_url:
+            logger.warning(
+                f"【{self.cookie_id}】Risk control detected, cooldown {retry_after}s, reason={reason}, captcha_url={self.risk_control_url}"
+            )
+        else:
+            logger.warning(f"【{self.cookie_id}】Risk control detected, cooldown {retry_after}s, reason={reason}")
 
     def is_auto_confirm_enabled(self) -> bool:
         """检查当前账号是否启用自动确认发货"""
@@ -320,6 +377,11 @@ class XianyuLive:
     async def refresh_token(self):
         """刷新token"""
         try:
+            if self._is_risk_control_active():
+                wait_seconds = self._get_risk_control_wait_seconds()
+                logger.warning(f"【{self.cookie_id}】Risk control cooldown is active, skip token refresh for {wait_seconds}s")
+                return None
+
             logger.info(f"【{self.cookie_id}】开始刷新token...")
             params = {
                 'jsv': '2.7.2',
@@ -359,32 +421,41 @@ class XianyuLive:
                     headers=headers
                 ) as response:
                     res_json = await response.json()
-                    
-                    # 检查并更新Cookie
-                    if 'set-cookie' in response.headers:
-                        new_cookies = {}
-                        for cookie in response.headers.getall('set-cookie', []):
-                            if '=' in cookie:
-                                name, value = cookie.split(';')[0].split('=', 1)
-                                new_cookies[name.strip()] = value.strip()
-                        
-                        # 更新cookies
-                        if new_cookies:
-                            self.cookies.update(new_cookies)
-                            # 生成新的cookie字符串
-                            self.cookies_str = '; '.join([f"{k}={v}" for k, v in self.cookies.items()])
-                            # 更新数据库中的Cookie
-                            await self.update_config_cookies()
-                            logger.debug("已更新Cookie到数据库")
-                    
+
+                    if self._is_risk_control_response(res_json):
+                        risk_url = self._extract_risk_control_url(res_json)
+                        self._mark_risk_control(str(res_json.get('ret', res_json)), risk_url)
+                        notify_msg = f"Token刷新被风控拦截: {res_json}"
+                        if risk_url:
+                            notify_msg = f"{notify_msg} | captcha_url: {risk_url}"
+                        await self.send_token_refresh_notification(notify_msg, "token_risk_control")
+                        return None
+
                     if isinstance(res_json, dict):
                         ret_value = res_json.get('ret', [])
                         # 检查ret是否包含成功信息
-                        if any('SUCCESS::调用成功' in ret for ret in ret_value):
+                        if any('SUCCESS::' in str(ret) for ret in ret_value):
                             if 'data' in res_json and 'accessToken' in res_json['data']:
                                 new_token = res_json['data']['accessToken']
                                 self.current_token = new_token
                                 self.last_token_refresh_time = time.time()
+                                self.risk_control_until = 0
+                                self.risk_control_url = ""
+
+                                # 仅在成功时接收并回写服务端返回的Set-Cookie
+                                if 'set-cookie' in response.headers:
+                                    new_cookies = {}
+                                    for cookie in response.headers.getall('set-cookie', []):
+                                        if '=' in cookie:
+                                            name, value = cookie.split(';')[0].split('=', 1)
+                                            new_cookies[name.strip()] = value.strip()
+
+                                    if new_cookies:
+                                        self.cookies.update(new_cookies)
+                                        self.cookies_str = '; '.join([f"{k}={v}" for k, v in self.cookies.items()])
+                                        await self.update_config_cookies()
+                                        logger.debug("已更新Cookie到数据库")
+
                                 logger.info(f"【{self.cookie_id}】Token刷新成功")
                                 return new_token
                             
@@ -2133,6 +2204,12 @@ class XianyuLive:
                     logger.info(f"【{self.cookie_id}】账号已禁用，停止Token刷新循环")
                     break
 
+                if self._is_risk_control_active():
+                    wait_seconds = self._get_risk_control_wait_seconds()
+                    logger.warning(f"【{self.cookie_id}】Risk control cooldown is active, token refresh loop sleep {wait_seconds}s")
+                    await asyncio.sleep(max(wait_seconds, 1))
+                    continue
+
                 current_time = time.time()
                 if current_time - self.last_token_refresh_time >= self.token_refresh_interval:
                     logger.info("Token即将过期，准备刷新...")
@@ -2226,6 +2303,11 @@ class XianyuLive:
     async def init(self, ws):
         # 如果没有token或者token过期，获取新token
         token_refresh_attempted = False
+        if self._is_risk_control_active():
+            wait_seconds = self._get_risk_control_wait_seconds()
+            logger.warning(f"【{self.cookie_id}】Risk control cooldown is active, skip init token refresh for {wait_seconds}s")
+            raise Exception(f"Token风控冷却中({wait_seconds}s)")
+
         if not self.current_token or (time.time() - self.last_token_refresh_time) >= self.token_refresh_interval:
             logger.info(f"【{self.cookie_id}】获取初始token...")
             token_refresh_attempted = True
@@ -2936,7 +3018,11 @@ class XianyuLive:
                         self.heartbeat_task.cancel()
                     if self.token_refresh_task:
                         self.token_refresh_task.cancel()
-                    await asyncio.sleep(5)  # 等待5秒后重试
+                    retry_delay = 5
+                    if self._is_risk_control_active():
+                        retry_delay = max(retry_delay, self._get_risk_control_wait_seconds())
+                        logger.warning(f"【{self.cookie_id}】Risk control cooldown is active, postpone reconnect by {retry_delay}s")
+                    await asyncio.sleep(retry_delay)
                     continue
         finally:
             await self.close_session()  # 确保关闭session
